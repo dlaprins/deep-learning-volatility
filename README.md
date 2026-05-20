@@ -1,3 +1,5 @@
+# Deep Learning Realized Volatility
+
 Deep Learning realized volatility; comparing TCN and HAR for realized volatility forecasts. 
 
 This code backtests both the statistical HAR model (Corsi, 2009) and a deep learning TCN model (Bai et al, 2018) on the Oxford-Man realized volatility index data. 
@@ -34,14 +36,14 @@ For each $t$:
 
 **HAR (per-horizon model):**
 
-1. `rv5_ss` at $t$ — subsampled realized variance (5-min)
+1. `rv5_ss` at $t$: subsampled realized variance (5-min)
 2. Mean of `rv5_ss` over $[t-4, \dots, t]$ — weekly
 3. Mean of `rv5_ss` over $[t-21, \dots, t]$ — monthly
 
 **TCN (single multi-horizon model):** HAR features plus
 
-4. `rsv_ss` at $t$ — subsampled realized semi-variance (negative returns)
-5. `jump` at $t$ — $\max(0,\ \text{rv5\_ss} - \text{bv\_ss})$, where `bv_ss` is subsampled bipower variation
+4. `rsv_ss` at $t$: subsampled realized semi-variance (negative returns)
+5. `jump` at $t$: $`max(0, rv5_ss - bv_ss)` where `bv_ss` is subsampled bipower variation
 6. `open_to_close` at $t$ — daily return
 7. Symbol embedding
 
@@ -86,36 +88,3 @@ Per-head loss weighting may be required to prevent the higher-variance day-ahead
 - Corsi, F. (2009). *A Simple Approximate Long-Memory Model of Realized Volatility.* Journal of Financial Econometrics, 7(2), 174–196.
 - Patton, A. J. (2011). *Volatility forecast comparison using imperfect volatility proxies.* Journal of Econometrics, 160(1), 246–256.
 - Gerd Heber, Asger Lunde, Neil Shephard, and Kevin Sheppard (2009). *Oxford-Man Institute's Realized Library, version 0.3.* Oxford-Man Institute, University of Oxford.
-
-
-
-## Methodology
-The data consists of 129.209 rows, spanning 31 symbols over the period 2001-01-03 up to 2018-06-26. 
-
-Targets:
-    1. 'rv5_ss' at t + 1
-    2. 'rv5_ss' mean over [t+1, .., t+5]
-    3. 'rv5_ss' mean over [t+1, .., t+22]
-
-Features for the HAR model are fixed to 
-    1. 'rv5_ss' at t: subsampled realized volatility over 5 min
-    2. 'rv5_ss' mean over [t-4, .., t]: weekly mean
-    3. 'rv5_ss' mean over [t-21, .., t]: monthly mean
-For the TCN model, these are complemented by
-    3. 'rv5_ss' mean over [t-21, .., t]: monthly mean
-    4. 'rsv_ss' at t: subsampled realized semi-variance (negative returns only) 
-    5. jump at t: floor of rv5_ss - bv_ss (subsampled bipower variation)
-    6. 'open_to_close' at t: returns
-    7. Embedding layer for symbols
-
-- All features are log-transformed (except returns), after taking the mean. Jump is log1p transformed instead. 
-- All features are z-normalized after log-transforming, using rolling normalization per symbol, capped at 252 days. For samples with less than the full 252 ticks prior, expanding normalization is used instead (i.e., everything available is used).
-- All targets are log-transformed
-- Targets are not normalized symbol. This may introduce mild symbol-biases, but ensures the loss definition remains clean.
-
-- The symbol layer is added as a bias to the output. Some symbol asymmetry and agnosticism remains. This is deemed acceptable due to cross-correlation of volatility. 
-- For each horizon, a separate HAR model is trained. There is only a single TCN model  with 3-headed output layer
-- train/val/test split: [2000-2014], [2014-2015], [2016-2018]. Splitting is performed before normalization. Gaps of 22 days between each set ensures no target leakage. The validation set is used for early-stopping to avoid overfitting. 
-- QLIKE loss (in log-space) is used both for backtest evaluation and for DL-loss function: 
-L = exp(y - y_hat) - (y - y_hat) - 1. 
-Per-head weighting of the loss function might be needed in training to ensure the loss is not dominated by the higher variance of point-in-time volatility; to be investigated. Backtesting will be done on a per-horizon basis. 

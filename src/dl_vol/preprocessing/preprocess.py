@@ -1,6 +1,6 @@
 """Data preprocessing for the realized-volatility panel.
 
-Owns:
+Contains:
   - feature engineering (HAR-style log features + jump + return signals),
   - forward-looking multi-horizon log-RV targets,
   - per-symbol rolling z-score normalization (252-day cap),
@@ -13,7 +13,7 @@ Tensor layouts (channels-first to match nn.Conv1d):
     y : (N, H)      multi-horizon log-RV targets aligned with the LAST day of X
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -23,15 +23,19 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 FEATURE_NAMES: tuple[str, ...] = (
+    # z-normalized (rolling 252-day): capture deviations from recent mean
     'log_rv5', 'log_rv5_roll5', 'log_rv5_roll22',
-    'log_rsv', 'log_jump', 'ret', 'ret2',
+    'log_rsv', 'log_jump', 'ret',
+    # raw (un-normalized): anchor absolute level so the output head can
+    # predict symbol-specific log-RV means without a symbol embedding
+    'raw_log_rv5', 'raw_log_rv5_roll5', 'raw_log_rv5_roll22',
 )
 TARGET_NAMES: tuple[str, ...] = ('h1', 'h5', 'h22')
 
 SEQ_LEN = 64
 NORM_WINDOW = 252            # rolling normalization cap (trading days)
 LEAKAGE_GAP = 22             # days dropped between splits to avoid target leakage
-LOG_FEATURE_MASK = (True, True, True, True, True, False, False)  # ret, ret2 stay raw
+LOG_FEATURE_MASK = (True, True, True, True, True, False, False, False, False)  # ret and raw_* stay un-normalized
 
 
 @dataclass
@@ -46,7 +50,7 @@ class PanelData:
     feature_names: tuple[str, ...]
     target_names: tuple[str, ...]
     head_weights: tuple[float, ...]
-    train_target_std: tuple[float, ...] = field(default_factory=tuple)
+    test_dummy_preds: torch.Tensor   # (N_test, 3) raw log-RV persistence predictions
 
 
 # --- feature / target engineering -----------------------------------------
@@ -56,10 +60,10 @@ def build_features(grp: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     Features are computed with information up to and including day t.
     `log_*` features are computed AFTER taking the relevant rolling mean
-    (i.e. log of mean, per design.md). `log_jump` uses log1p on a floored
-    jump component. Returns and squared returns are kept in raw space.
+    (i.e. log of mean). `log_jump` uses log1p on a floored
+    jump component. Returns are kept in raw space.
 
-    Targets are forward-looking log-RV.
+    Targets are forward-looking log-RV and log-mean-RV.
     """
     log_rv5        = np.log(grp['rv5_ss'])
     log_rv5_roll5  = np.log(grp['rv5_ss'].rolling(5).mean())
@@ -67,21 +71,21 @@ def build_features(grp: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     log_rsv        = np.log(grp['rsv_ss'])
     log_jump       = np.log1p(np.maximum(grp['rv5_ss'] - grp['bv_ss'], 0.0))
     ret            = grp['open_to_close']
-    ret2           = grp['open_to_close'] ** 2
 
     target_h1  = np.log(grp['rv5_ss'].shift(-1))
     target_h5  = np.log(grp['rv5_ss'].rolling(5).mean().shift(-5))
     target_h22 = np.log(grp['rv5_ss'].rolling(22).mean().shift(-22))
 
     feat = pd.concat(
-        [log_rv5, log_rv5_roll5, log_rv5_roll22, log_rsv, log_jump, ret, ret2],
+        [log_rv5, log_rv5_roll5, log_rv5_roll22, log_rsv, log_jump, ret,
+         log_rv5, log_rv5_roll5, log_rv5_roll22],  # raw repeats (not z-scored)
         axis=1,
     )
     feat.columns = list(FEATURE_NAMES)
 
-    tgt = pd.concat([target_h1, target_h5, target_h22], axis=1)
-    tgt.columns = list(TARGET_NAMES)
-    return feat, tgt
+    target = pd.concat([target_h1, target_h5, target_h22], axis=1)
+    target.columns = list(TARGET_NAMES)
+    return feat, target
 
 
 # --- normalization --------------------------------------------------------
@@ -90,9 +94,7 @@ def rolling_zscore(df: pd.DataFrame, window: int = NORM_WINDOW) -> pd.DataFrame:
     """Per-column rolling z-score with a 252-day cap.
 
     For t < window the statistics use the full available expanding history
-    [0, t]; for t >= window they use only the past `window` rows. This
-    matches design.md: "normalize with all data before t=252, afterwards
-    use only the past 252 days".
+    [0, t]; for t >= window they use only the past `window` rows.
     """
     # `min_periods=1` makes the initial part expanding; once `window` rows
     # are available `pandas.rolling` becomes a true 252-day window.
@@ -107,7 +109,7 @@ def rolling_zscore(df: pd.DataFrame, window: int = NORM_WINDOW) -> pd.DataFrame:
 
 def make_windows(
     feat_arr: np.ndarray,
-    tgt_arr: np.ndarray,
+    target_arr: np.ndarray,
     seq_len: int,
 ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     """Slide a length-`seq_len` window over one symbol's series."""
@@ -118,7 +120,7 @@ def make_windows(
     idx = np.arange(seq_len)[None, :] + np.arange(T - seq_len + 1)[:, None]  # (N, L)
     X = feat_arr[idx]                  # (N, L, F)
     X = X.transpose(0, 2, 1)           # (N, F, L)
-    y = tgt_arr[seq_len - 1:]          # (N, H)
+    y = target_arr[seq_len - 1:]          # (N, H)
     # window_end_idx[i] = i + L - 1 is the absolute time index of the last
     # day in window i (used later for date-based splitting).
     window_end_idx = np.arange(seq_len - 1, T)
@@ -134,21 +136,26 @@ def make_windows(
 def _split_mask(
     end_dates: pd.Series,
     train_end: pd.Timestamp,
-    val_start: pd.Timestamp, val_end: pd.Timestamp,
+    val_start: pd.Timestamp,
     test_start: pd.Timestamp,
     gap_days: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Date-based split with a `gap_days` buffer between splits.
+    """Date-based split with a business-day gap buffer on both sides of each boundary.
 
     `end_dates` are the dates of the LAST day of each window (the day on
-    which the forecast is emitted). The buffer is applied on both sides of
-    the gap, so e.g. windows whose last day is in `[train_end - gap, train_end]`
-    are dropped from training to ensure their forward targets do not bleed
-    into the validation period.
+    which the forecast is emitted). `gap_days` is in business days, matching
+    the maximum forecast horizon, so no forward target can bleed across a
+    split boundary.
+
+    Boundaries:
+      train/val : last train window <= train_end - gap
+                  first val window  >= val_start  (= train_end + 1bd)
+      val/test  : last val window   <= test_start - gap
+                  first test window >= test_start
     """
-    gap = pd.Timedelta(days=gap_days)
+    gap = pd.offsets.BDay(gap_days)
     train = (end_dates <= (train_end - gap)).to_numpy()
-    val   = ((end_dates >= val_start) & (end_dates <= (val_end - gap))).to_numpy()
+    val   = ((end_dates >= val_start) & (end_dates <= (test_start - gap))).to_numpy()
     test  = (end_dates >= test_start).to_numpy()
     return train, val, test
 
@@ -157,10 +164,9 @@ def build_panel(
     csv_path: str | Path,
     seq_len: int = SEQ_LEN,
     batch_size: int = 128,
-    train_end: str = '2015-12-31',
-    val_start: str = '2016-01-01',
-    val_end: str = '2017-12-31',
-    test_start: str = '2018-01-01',
+    train_end: str = '2013-12-31',
+    val_start: str = '2014-01-01',
+    test_start: str = '2016-01-01',
     gap_days: int = LEAKAGE_GAP,
     num_workers: int = 0,
 ) -> PanelData:
@@ -172,16 +178,16 @@ def build_panel(
     data['Date'] = pd.to_datetime(data['Date'], utc=True).dt.tz_localize(None).dt.normalize()
     data = data.sort_values(['Symbol', 'Date']).reset_index(drop=True)
 
-    train_end_ts = pd.Timestamp(train_end)
-    val_start_ts = pd.Timestamp(val_start)
-    val_end_ts   = pd.Timestamp(val_end)
+    train_end_ts  = pd.Timestamp(train_end)
+    val_start_ts  = pd.Timestamp(val_start)
     test_start_ts = pd.Timestamp(test_start)
 
     log_mask = np.array(LOG_FEATURE_MASK, dtype=bool)
 
-    X_tr_l, y_tr_l = [], []
-    X_va_l, y_va_l = [], []
-    X_te_l, y_te_l = [], []
+    X_train_l, y_train_l = [], []
+    X_val_l, y_val_l = [], []
+    X_test_l, y_test_l = [], []
+    dummy_test_l: list[np.ndarray] = []
 
     for sym, grp in data.groupby('Symbol', sort=False):
         grp = grp.sort_values('Date').reset_index(drop=True)
@@ -198,18 +204,23 @@ def build_panel(
         X_sym, y_sym, end_idx = make_windows(feat_norm.values, tgt.values, seq_len)
         if X_sym is None or len(X_sym) == 0:
             continue
+        # Raw log-RV at last time step: used as dummy persistence predictions.
+        # feat.values[end_idx, :3] = [log_rv5, log_rv5_roll5, log_rv5_roll22] at time t,
+        # in the same (un-normalized) space as the targets.
+        dummy_sym = feat.values[end_idx, :3].astype(np.float32)
         end_dates = grp['Date'].iloc[end_idx].reset_index(drop=True)
 
         tr, va, te = _split_mask(
-            end_dates, train_end_ts, val_start_ts, val_end_ts, test_start_ts, gap_days
+            end_dates, train_end_ts, val_start_ts, test_start_ts, gap_days
         )
 
         if tr.any():
-            X_tr_l.append(X_sym[tr]); y_tr_l.append(y_sym[tr])
+            X_train_l.append(X_sym[tr]); y_train_l.append(y_sym[tr])
         if va.any():
-            X_va_l.append(X_sym[va]); y_va_l.append(y_sym[va])
+            X_val_l.append(X_sym[va]); y_val_l.append(y_sym[va])
         if te.any():
-            X_te_l.append(X_sym[te]); y_te_l.append(y_sym[te])
+            X_test_l.append(X_sym[te]); y_test_l.append(y_sym[te])
+            dummy_test_l.append(dummy_sym[te])
 
     def _stack(xs, ys):
         if not xs:
@@ -222,19 +233,17 @@ def build_panel(
         y = torch.from_numpy(np.concatenate(ys, axis=0)).float()
         return X, y
 
-    X_tr, y_tr = _stack(X_tr_l, y_tr_l)
-    X_va, y_va = _stack(X_va_l, y_va_l)
-    X_te, y_te = _stack(X_te_l, y_te_l)
+    X_train, y_train = _stack(X_train_l, y_train_l)
+    X_val, y_val = _stack(X_val_l, y_val_l)
+    X_test, y_test = _stack(X_test_l, y_test_l)
 
-    # Head weights = 1 / Var(target) on the training set, so each horizon
-    # contributes comparably to the multi-task loss.
-    if len(y_tr) > 0:
-        var = y_tr.var(dim=0, unbiased=False).clamp_min(1e-8)
-        head_weights = tuple((1.0 / var).tolist())
-        train_target_std = tuple(y_tr.std(dim=0, unbiased=False).tolist())
-    else:
-        head_weights = (1.0,) * len(TARGET_NAMES)
-        train_target_std = (1.0,) * len(TARGET_NAMES)
+    test_dummy_preds = (
+        torch.from_numpy(np.concatenate(dummy_test_l, axis=0))
+        if dummy_test_l
+        else torch.empty(0, 3, dtype=torch.float32)
+    )
+
+    head_weights = (1.0,) * len(TARGET_NAMES)
 
     def _loader(X, y, shuffle):
         return DataLoader(
@@ -246,14 +255,14 @@ def build_panel(
         )
 
     return PanelData(
-        train_loader=_loader(X_tr, y_tr, shuffle=True),
-        val_loader=_loader(X_va, y_va, shuffle=False),
-        test_loader=_loader(X_te, y_te, shuffle=False),
+        train_loader=_loader(X_train, y_train, shuffle=True),
+        val_loader=_loader(X_val, y_val, shuffle=False),
+        test_loader=_loader(X_test, y_test, shuffle=False),
         num_features=len(FEATURE_NAMES),
         num_horizons=len(TARGET_NAMES),
         seq_len=seq_len,
         feature_names=FEATURE_NAMES,
         target_names=TARGET_NAMES,
         head_weights=head_weights,
-        train_target_std=train_target_std,
+        test_dummy_preds=test_dummy_preds,
     )

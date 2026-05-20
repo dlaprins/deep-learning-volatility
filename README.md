@@ -37,14 +37,14 @@ For each $t$:
 **HAR (per-horizon model):**
 
 1. `rv5_ss` at $t$: subsampled realized variance (5-min)
-2. Mean of `rv5_ss` over $[t-4, \dots, t]$ — weekly
-3. Mean of `rv5_ss` over $[t-21, \dots, t]$ — monthly
+2. Mean of `rv5_ss` over $[t-4, \dots, t]$: weekly
+3. Mean of `rv5_ss` over $[t-21, \dots, t]$: monthly
 
 **TCN (single multi-horizon model):** HAR features plus
 
 4. `rsv_ss` at $t$: subsampled realized semi-variance (negative returns)
 5. `jump` at $t$: $`max(0, rv5_ss - bv_ss)` where `bv_ss` is subsampled bipower variation
-6. `open_to_close` at $t$ — daily return
+6. `open_to_close` at $t$: daily return
 7. Symbol embedding
 
 ### Transformations

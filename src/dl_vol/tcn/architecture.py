@@ -44,7 +44,7 @@ class TemporalBlock(nn.Module):
             else None
         )
 
-    self.init_weights()
+        self.init_weights()
 
 
     def init_weights(self):

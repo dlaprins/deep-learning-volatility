@@ -50,7 +50,7 @@ For each $t$:
 ### Transformations
 
 - Features (except returns) are log-transformed after aggregation; `jump` uses `log1p`.
-- Features are z-normalized per symbol using a causal rolling window capped at 252 days. For samples with fewer than 252 prior observations, an expanding window is used.
+- Features are z-normalized per symbol using a trailing 252-day rolling window (including day $t$). For the first 252 observations per symbol, an expanding window is used instead.
 - Targets are log-transformed.
 - Targets are not symbol-normalized. This may introduce mild per-symbol bias but keeps the loss definition clean and scale-equivariant in variance.
 
@@ -72,13 +72,13 @@ Splitting is performed before normalization. A 22-day gap between splits prevent
 
 ### Loss function
 
-QLIKE in log-variance parameterization is used for both training and backtesting:
+MSE is used in log-space for training. For backtesting and early stopping, QLIKE in log-space is used:
 
 $$
 L = \exp(y - \hat y) - (y - \hat y) - 1, \qquad y = \log \sigma^2
 $$
 
-Algebraically equivalent to Patton's QLIKE on variance: robust to noise in the volatility proxy, asymmetric (under-prediction penalized more than over-prediction), and using the same form for training and evaluation eliminates train/eval mismatch.
+Algebraically equivalent to Patton's QLIKE on variance: robust to noise in the volatility proxy, asymmetric (under-prediction penalized more than over-prediction). Not used for training due to its asymmetrical nature. Note that MSE in log space is equivalent to negative log-likelihood under the assumptions 1. log RV is Gaussian, and 2. its variance is homoscedastic 
 
 Per-head loss weighting may be required to prevent the higher-variance day-ahead head from dominating training; to be investigated. Backtesting is reported per horizon.
 

@@ -4,14 +4,11 @@ Tensor layouts (channels-first to match nn.Conv1d):
     X : (B, F, L)   = (Batch, Features, Length of window): features for the past L days 
     y : (B, H)      = (Batch, Horizons) log-transformed multi-horizon targets (i.e., H targets)
 """
-
-from __future__ import annotations
-
 import torch
 from torch.utils.data import DataLoader
 
 from dl_vol.tcn.architecture import TCN, TCNForecast
-from dl_vol.eval.metrics import mse_per_horizon, qlike_per_horizon, evaluate
+from dl_vol.eval.metrics import gaussian_nll_per_horizon, qlike_per_horizon, evaluate
 
 def str_formatv(v):
     return '[' + ', '.join(f'{x:.4f}' for x in v) + ']'
@@ -30,14 +27,14 @@ def train(
     patience: int = 5,
     device: str | None = None,
 ):
-    """Train a TCNForecast model with weighted QLIKE loss.
+    """Train a TCNForecast model with Gaussian NLL (MSE in log space) training loss.
 
     Loaders yield (xb, yb) batches:
         xb: (B, F, L) float32  — already normalized features
         yb: (B, H)    float32  — log-transformed targets
 
-    Training loss: sum_h w_h * QLIKE_h(pred, target).
-    Reporting   : per-horizon MSE and QLIKE on train (running) and val.
+    Training loss : Gaussian NLL = MSE in log-variance space (stable, unbiased MLE).
+    Early stopping: val QLIKE (Patton-robust, matches backtest metric).
     """
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
     w = torch.tensor(head_weights, dtype=torch.float32, device=device)  # (H,)
@@ -57,8 +54,7 @@ def train(
 
     for epoch in range(num_epochs):
         model.train()
-        train_qlike_sum = torch.zeros(num_horizons, device=device)
-        train_mse_sum   = torch.zeros(num_horizons, device=device)
+        train_loss_sum = torch.zeros(num_horizons, device=device)
         train_n = 0
 
         for xb, yb in train_loader:
@@ -66,22 +62,20 @@ def train(
             yb = yb.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            yb_pred = model(xb)                            # (B, H)
-            q_per_h = qlike_per_horizon(yb_pred, yb)       # (H,)
-            loss = (w * q_per_h).sum()
+            yb_pred = model(xb)                                    # (B, H)
+            nll_per_h = gaussian_nll_per_horizon(yb_pred, yb)      # (H,)
+            loss = (w * nll_per_h).sum()
             loss.backward()
             optimizer.step()
 
             with torch.no_grad():
                 bsz = xb.size(0)
-                train_qlike_sum += q_per_h.detach() * bsz
-                train_mse_sum   += mse_per_horizon(yb_pred.detach(), yb) * bsz
+                train_loss_sum += nll_per_h.detach() * bsz
                 train_n += bsz
 
-        train_qlike = (train_qlike_sum / max(train_n, 1)).cpu().tolist()
-        train_mse   = (train_mse_sum   / max(train_n, 1)).cpu().tolist()
+        train_loss = (train_loss_sum / max(train_n, 1)).cpu().tolist()
 
-        val_mse, val_qlike = evaluate(model, val_loader, device, num_horizons)
+        val_qlike = evaluate(model, val_loader, device, num_horizons)
 
         val_qlike_scalar = sum(val_qlike)
         improved = val_qlike_scalar < best_val_qlike
@@ -94,8 +88,8 @@ def train(
 
         print(
             f'epoch {epoch + 1:02d}  '
-            f'train QLIKE={str_formatv(train_qlike)} MSE={str_formatv(train_mse)}  '
-            f'val QLIKE={str_formatv(val_qlike)} MSE={str_formatv(val_mse)}'
+            f'train NLL={str_formatv(train_loss)}  '
+            f'val QLIKE={str_formatv(val_qlike)}'
             + ('' if improved else f'  (no improvement {epochs_without_improvement}/{patience})')
         )
 

@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -60,7 +59,8 @@ class TemporalBlock(nn.Module):
     def forward(self, x):
         residual = self.downsample(x) if self.downsample is not None else x
 
-        out = F.pad(x, (self.left_padding, 0))  # Left-pad for causality
+         # Left-pad for causality
+        out = F.pad(x, (self.left_padding, 0)) 
         out = self.conv(out)
         out = self.relu(out)
         out = self.dropout(out)
@@ -115,7 +115,7 @@ class TCN(nn.Module):
     
 
 class TCNForecast(nn.Module):
-    """TCN-based forecaster for time series forecasting.
+    """TCN-based model for time series forecasting.
 
     Args:
         tcn (TCN): An instance of the TCN class.

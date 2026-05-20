@@ -3,14 +3,15 @@ from pathlib import Path
 from dl_vol.preprocessing.preprocess import build_panel
 from dl_vol.tcn.train import train
 from dl_vol.eval.metrics import evaluate
-
+from dl_vol.eval.dummy import evaluate_dummy
+from loguru import logger
 
 CSV_PATH = Path(__file__).parents[2] / 'data' / 'oxfordmanrealizedvolatilityindices.csv'
 
 
 def main():
     panel = build_panel(csv_path=CSV_PATH, batch_size=128)
-    print(
+    logger.info(
         f'panel: F={panel.num_features} L={panel.seq_len} H={panel.num_horizons} '
         f'head_weights={tuple(round(w, 4) for w in panel.head_weights)}'
     )
@@ -25,10 +26,16 @@ def main():
     )
 
     device = next(model.parameters()).device.type
-    test_mse, test_qlike = evaluate(
+    tcn_qlike = evaluate(
         model, panel.test_loader, device=device, num_horizons=panel.num_horizons
     )
-    print(f'test  MSE={test_mse}  QLIKE={test_qlike}')
+    dummy_qlike = evaluate_dummy(panel.test_dummy_preds, panel.test_loader)
+
+    horizons = panel.target_names
+    logger.info('--- test QLIKE (lower is better) ---')
+    logger.info(f'{"horizon":<8}  {"dummy":>10}  {"tcn":>10}  {"delta":>10}')
+    for h, dq, tq in zip(horizons, dummy_qlike, tcn_qlike):
+        logger.info(f'{h:<8}  {dq:>10.6f}  {tq:>10.6f}  {tq - dq:>+10.6f}')
     return model
 
 

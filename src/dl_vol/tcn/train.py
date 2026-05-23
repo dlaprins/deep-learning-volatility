@@ -1,17 +1,20 @@
 """Self-contained TCN training for multi-horizon log realized variance.
 
 Tensor layouts (channels-first to match nn.Conv1d):
-    X : (B, F, L)   = (Batch, Features, Length of window): features for the past L days 
+    X : (B, F, L)   = (Batch, Features, Length of window): features for the past L days
     y : (B, H)      = (Batch, Horizons) log-transformed multi-horizon targets (i.e., H targets)
 """
+
 import torch
 from torch.utils.data import DataLoader
 
+from dl_vol.eval.metrics import evaluate, gaussian_nll_per_horizon
 from dl_vol.tcn.architecture import TCN, TCNForecast
-from dl_vol.eval.metrics import gaussian_nll_per_horizon, qlike_per_horizon, evaluate
+
 
 def str_formatv(v):
-    return '[' + ', '.join(f'{x:.4f}' for x in v) + ']'
+    return "[" + ", ".join(f"{x:.4f}" for x in v) + "]"
+
 
 def train(
     train_loader: DataLoader,
@@ -36,7 +39,7 @@ def train(
     Training loss : Gaussian NLL = MSE in log-variance space (stable, unbiased MLE).
     Early stopping: val QLIKE (Patton-robust, matches backtest metric).
     """
-    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     w = torch.tensor(head_weights, dtype=torch.float32, device=device)  # (H,)
 
     tcn = TCN(
@@ -48,7 +51,7 @@ def train(
     model = TCNForecast(tcn, output_size=num_horizons).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-    best_val_qlike = float('inf')
+    best_val_qlike = float("inf")
     best_state = None
     epochs_without_improvement = 0
 
@@ -62,8 +65,8 @@ def train(
             yb = yb.to(device, non_blocking=True)
 
             optimizer.zero_grad()
-            yb_pred = model(xb)                                    # (B, H)
-            nll_per_h = gaussian_nll_per_horizon(yb_pred, yb)      # (H,)
+            yb_pred = model(xb)  # (B, H)
+            nll_per_h = gaussian_nll_per_horizon(yb_pred, yb)  # (H,)
             loss = (w * nll_per_h).sum()
             loss.backward()
             optimizer.step()
@@ -87,14 +90,14 @@ def train(
             epochs_without_improvement += 1
 
         print(
-            f'epoch {epoch + 1:02d}  '
-            f'train NLL={str_formatv(train_loss)}  '
-            f'val QLIKE={str_formatv(val_qlike)}'
-            + ('' if improved else f'  (no improvement {epochs_without_improvement}/{patience})')
+            f"epoch {epoch + 1:02d}  "
+            f"train NLL={str_formatv(train_loss)}  "
+            f"val QLIKE={str_formatv(val_qlike)}"
+            + ("" if improved else f"  (no improvement {epochs_without_improvement}/{patience})")
         )
 
         if epochs_without_improvement >= patience:
-            print(f'early stopping at epoch {epoch + 1}')
+            print(f"early stopping at epoch {epoch + 1}")
             break
 
     if best_state is not None:

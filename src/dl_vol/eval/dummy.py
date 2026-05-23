@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 from dl_vol.eval.metrics import qlike_per_horizon
 
 
-def evaluate_dummy(
+def backtest_dummy(
     dummy_preds: torch.Tensor,
     test_loader: DataLoader,
 ) -> list[float]:
@@ -36,8 +36,8 @@ def evaluate_dummy(
 
     if dummy_preds.shape != y.shape:
         raise ValueError(
-            f'dummy_preds shape {dummy_preds.shape} != target shape {y.shape}. '
-            'Ensure test_loader uses shuffle=False.'
+            f"dummy_preds shape {dummy_preds.shape} != target shape {y.shape}. "
+            "Ensure test_loader uses shuffle=False."
         )
 
     return qlike_per_horizon(dummy_preds, y).tolist()

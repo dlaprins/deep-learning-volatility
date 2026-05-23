@@ -3,6 +3,7 @@
 All functions operate on log-variance tensors of shape (B, H) and return
 per-horizon vectors of shape (H,).
 """
+
 import torch
 from torch.utils.data import DataLoader
 
@@ -20,8 +21,8 @@ def gaussian_nll_per_horizon(pred_log: torch.Tensor, target_log: torch.Tensor) -
 def qlike_per_horizon(pred_log: torch.Tensor, target_log: torch.Tensor) -> torch.Tensor:
     """Per-horizon QLIKE computed from log-space predictions.
 
-    QLIKE(y, y_hat) = y / y_hat - log(y / y_hat) - 1 
-    
+    QLIKE(y, y_hat) = y / y_hat - log(y / y_hat) - 1
+
     in variance space. Using r = exp(target_log - pred_log) avoids exp() on the prediction
     alone and is numerically friendlier early in training.
     """

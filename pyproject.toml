@@ -10,7 +10,8 @@ dependencies = [
     "torch>=2.0",
     "numpy>=1.24",
     "pandas>=2.0",
-    "loguru>=0.7.3", 
+    "loguru>=0.7.3",
+    "scikit-learn>=1.5.2",
 ]
 
 [project.scripts]
@@ -18,3 +19,21 @@ dl-vol = "dl_vol.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dl_vol"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E741",  # ambiguous variable name (l, O, I) — common in math-heavy code
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["dl_vol"]
